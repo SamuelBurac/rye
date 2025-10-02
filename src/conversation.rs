@@ -4,6 +4,13 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[derive(Clone)]
+pub struct ConversationInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub file_path: PathBuf,
+}
+
 pub struct Conversation {
     pub id: String,
     pub file_path: PathBuf,
@@ -204,11 +211,17 @@ fn parse_markdown_conversation(content: &str) -> (Vec<(String, String)>, Option<
         if lines[i].starts_with("## You") {
             i += 1;
             let mut user_content = Vec::new();
+            // Collect all lines until next header
             while i < lines.len() && !lines[i].starts_with("## ") {
-                if !lines[i].trim().is_empty() {
-                    user_content.push(lines[i]);
-                }
+                user_content.push(lines[i]);
                 i += 1;
+            }
+            // Trim leading and trailing empty lines
+            while user_content.first().map_or(false, |l| l.trim().is_empty()) {
+                user_content.remove(0);
+            }
+            while user_content.last().map_or(false, |l| l.trim().is_empty()) {
+                user_content.pop();
             }
             if !user_content.is_empty() {
                 messages.push(("user".to_string(), user_content.join("\n")));
@@ -216,11 +229,23 @@ fn parse_markdown_conversation(content: &str) -> (Vec<(String, String)>, Option<
         } else if lines[i].starts_with("## Assistant") {
             i += 1;
             let mut assistant_content = Vec::new();
+            // Collect all lines until next header
             while i < lines.len() && !lines[i].starts_with("## ") {
-                if !lines[i].trim().is_empty() {
-                    assistant_content.push(lines[i]);
-                }
+                assistant_content.push(lines[i]);
                 i += 1;
+            }
+            // Trim leading and trailing empty lines
+            while assistant_content
+                .first()
+                .map_or(false, |l| l.trim().is_empty())
+            {
+                assistant_content.remove(0);
+            }
+            while assistant_content
+                .last()
+                .map_or(false, |l| l.trim().is_empty())
+            {
+                assistant_content.pop();
             }
             if !assistant_content.is_empty() {
                 messages.push(("assistant".to_string(), assistant_content.join("\n")));
@@ -231,4 +256,45 @@ fn parse_markdown_conversation(content: &str) -> (Vec<(String, String)>, Option<
     }
 
     (messages, title)
+}
+
+pub fn list_conversations() -> io::Result<Vec<ConversationInfo>> {
+    let conversations_dir = get_conversations_dir()?;
+
+    if !conversations_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut conversations = Vec::new();
+
+    for entry in fs::read_dir(&conversations_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let content = fs::read_to_string(&path)?;
+            let (_, title) = parse_markdown_conversation(&content);
+
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            conversations.push(ConversationInfo {
+                id,
+                title,
+                file_path: path,
+            });
+        }
+    }
+
+    // Sort by modification time (newest first)
+    conversations.sort_by(|a, b| {
+        let a_time = fs::metadata(&a.file_path).and_then(|m| m.modified()).ok();
+        let b_time = fs::metadata(&b.file_path).and_then(|m| m.modified()).ok();
+        b_time.cmp(&a_time)
+    });
+
+    Ok(conversations)
 }

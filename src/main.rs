@@ -1,25 +1,108 @@
 mod conversation;
 mod providers;
 mod render;
+mod streaming;
 
 use clap::Parser;
-use conversation::Conversation;
-use futures::StreamExt;
+use conversation::{list_conversations, Conversation};
+use crossterm::{cursor, execute, terminal};
 use providers::{anthropic::AnthropicProvider, LLMProvider};
+use render::render_markdown;
 use rustyline::DefaultEditor;
-use std::io::{self, Write};
+use skim::prelude::*;
+use std::io;
+use std::sync::Arc;
+use streaming::stream_and_render_response;
 
 #[derive(Parser)]
 #[command(name = "rye")]
 #[command(about = "A CLI tool to chat with LLM's and store conversations in markdown")]
 struct Args {
-    /// Continue a conversation by ID
+    /// Continue a conversation (opens interactive selector if no ID provided)
     #[arg(short, long)]
-    continue_conversation: Option<String>,
+    r#continue: Option<Option<String>>,
 
     /// LLM provider to use (currently only "anthropic" is supported)
     #[arg(short, long, default_value = "anthropic")]
     provider: String,
+}
+
+fn select_conversation() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let conversations = list_conversations()?;
+
+    if conversations.is_empty() {
+        println!("No previous conversations found.");
+        return Ok(None);
+    }
+
+    // Prepare items for skim
+    let items: Vec<String> = conversations
+        .iter()
+        .map(|conv| {
+            if let Some(ref title) = conv.title {
+                format!("{} - {}", title, conv.id)
+            } else {
+                conv.id.clone()
+            }
+        })
+        .collect();
+
+    let options = SkimOptionsBuilder::default()
+        .height("50%".to_string())
+        .prompt("Select a conversation: ".to_string())
+        .build()
+        .unwrap();
+
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+
+    for item in items {
+        tx.send(Arc::new(item)).unwrap();
+    }
+    drop(tx);
+
+    let output = Skim::run_with(&options, Some(rx));
+
+    // Clear the terminal after skim exits to remove the skim UI
+    execute!(io::stdout(), terminal::Clear(terminal::ClearType::All))?;
+    execute!(io::stdout(), cursor::MoveTo(0, 0))?;
+
+    // Re-print the welcome message after clearing
+    println!("🥃 Welcome to Rye - Your LLM conversation tool");
+    println!("Conversations are stored in markdown files for easy searching");
+    println!("Type 'exit' to quit, 'help' for commands\n");
+
+    match output {
+        Some(out) if !out.is_abort => {
+            if let Some(selected) = out.selected_items.first() {
+                let selected_text = selected.output().to_string();
+                // Extract ID from the end (after the last " - ")
+                let id = if let Some(pos) = selected_text.rfind(" - ") {
+                    selected_text[pos + 3..].to_string()
+                } else {
+                    selected_text
+                };
+                Ok(Some(id))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn render_conversation_history(conversation: &Conversation) -> Result<(), Box<dyn std::error::Error>> {
+    // Read and render the entire markdown file
+    let content = std::fs::read_to_string(&conversation.file_path)?;
+
+    println!("\n{}", "═".repeat(60));
+    println!("📜 Conversation History");
+    println!("{}\n", "═".repeat(60));
+
+    render_markdown(&content)?;
+
+    println!("\n{}", "═".repeat(60));
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -39,18 +122,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut conversation = if let Some(conversation_id) = args.continue_conversation {
-        match Conversation::load(&conversation_id) {
-            Ok(conv) => {
-                println!("Continuing conversation: {}", conversation_id);
-                conv
+    let mut conversation = if let Some(continue_arg) = args.r#continue {
+        // --continue flag was provided
+        match continue_arg {
+            Some(id) => {
+                // ID was explicitly provided
+                match Conversation::load(&id) {
+                    Ok(conv) => {
+                        println!("Continuing conversation: {}", id);
+                        render_conversation_history(&conv)?;
+                        conv
+                    }
+                    Err(_) => {
+                        println!("Could not find conversation {}. Starting new conversation.", id);
+                        Conversation::new()?
+                    }
+                }
             }
-            Err(_) => {
-                println!(
-                    "Could not find conversation {}. Starting new conversation.",
-                    conversation_id
-                );
-                Conversation::new()?
+            None => {
+                // No ID provided, show interactive selector
+                match select_conversation()? {
+                    Some(id) => match Conversation::load(&id) {
+                        Ok(conv) => {
+                            println!("Continuing conversation: {}", id);
+                            render_conversation_history(&conv)?;
+                            conv
+                        }
+                        Err(_) => {
+                            println!("Could not find conversation {}. Starting new conversation.", id);
+                            Conversation::new()?
+                        }
+                    },
+                    None => {
+                        println!("No conversation selected. Starting new conversation.");
+                        let conv = Conversation::new()?;
+                        println!("Started new conversation: {}", conv.id);
+                        conv
+                    }
+                }
             }
         }
     } else {
@@ -76,13 +185,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if input == "exit" {
+        let input_lower = input.to_lowercase();
+
+        if input_lower == "exit" || input_lower == "quit" {
             break;
         }
 
-        if input == "help" {
+        if input_lower == "help" {
             println!("\nCommands:");
-            println!("  exit - Quit the program");
+            println!("  exit/quit - Quit the program (case insensitive)");
             println!("  help - Show this help");
             println!("  Conversation ID: {}", conversation.id);
             println!("  File: {}\n", conversation.file_path.display());
@@ -103,49 +214,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Print a visually appealing separator before assistant response
         println!("\n{}", "═".repeat(60));
         println!("🤖 Assistant Response:");
-        println!("{}\n", "═".repeat(60));
+        println!("{}", "═".repeat(60));
+        println!();
 
         match llm_provider.generate_response_stream(&api_messages).await {
-            Ok(mut stream) => {
-                let mut full_response = String::new();
+            Ok(stream) => {
+                match stream_and_render_response(stream).await {
+                    Ok(full_response) => {
+                        println!();
 
-                // Stream and display response in real-time
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(chunk) => {
-                            if !chunk.is_empty() {
-                                print!("{}", chunk);
-                                io::stdout().flush()?;
-                                full_response.push_str(&chunk);
-                            }
+                        // Save the complete response to conversation
+                        if !full_response.is_empty() {
+                            conversation.add_message("assistant", &full_response)?;
                         }
-                        Err(e) => {
-                            eprintln!("\nStream error: {}", e);
-                            break;
-                        }
-                    }
-                }
 
-                println!("\n");
-
-                // Save the complete response to conversation
-                if !full_response.is_empty() {
-                    conversation.add_message("assistant", &full_response)?;
-                }
-
-                // Generate title after first exchange if conversation doesn't have one
-                if conversation.title.is_none() && conversation.messages.len() == 2 {
-                    if let Some((_, first_user_message)) = conversation.messages.first() {
-                        match llm_provider.generate_title(first_user_message).await {
-                            Ok(title) => {
-                                if let Err(e) = conversation.set_title(title) {
-                                    eprintln!("Warning: Could not set conversation title: {}", e);
+                        // Generate title after first exchange if conversation doesn't have one
+                        if conversation.title.is_none() && conversation.messages.len() == 2 {
+                            if let Some((_, first_user_message)) = conversation.messages.first() {
+                                match llm_provider.generate_title(first_user_message).await {
+                                    Ok(title) => {
+                                        if let Err(e) = conversation.set_title(title) {
+                                            eprintln!("Warning: Could not set conversation title: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Warning: Could not generate title: {}", e);
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("Warning: Could not generate title: {}", e);
-                            }
                         }
+                    }
+                    Err(e) => {
+                        eprintln!("Streaming error: {}", e);
                     }
                 }
             }

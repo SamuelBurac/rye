@@ -22,3 +22,5 @@ much of which they repeat.
 The LLM will be prompted to output in markdown and it will be appended
 to the file, and instead of them repeating them selves they will just
 refer to previous sections in the markdown file.
+
+So far just vibe coded, how wonderful.

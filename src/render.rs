@@ -1,6 +1,6 @@
 use termimad::MadSkin;
 
-pub fn render_markdown(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn get_markdown_skin() -> MadSkin {
     let mut skin = MadSkin::default();
 
     // Customize the skin for better readability
@@ -10,15 +10,22 @@ pub fn render_markdown(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     skin.inline_code.set_fg(crossterm::style::Color::Magenta);
     skin.code_block.set_fg(crossterm::style::Color::Blue);
 
-    // Get terminal width for proper wrapping (max 100 chars wide)
-    let terminal_width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
+    // Add left padding for better readability
+    skin.paragraph.set_fgbg(crossterm::style::Color::Reset, crossterm::style::Color::Reset);
+    skin.paragraph.left_margin = 2;
+    skin.headers[0].left_margin = 2;
+    skin.headers[1].left_margin = 2;
+    skin.headers[2].left_margin = 2;
+    skin.code_block.left_margin = 4;
 
-    let _max_width = std::cmp::min(100, terminal_width.saturating_sub(4));
+    skin
+}
 
-    // Print with proper wrapping
-    skin.print_text(text);
+pub fn render_markdown(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let skin = get_markdown_skin();
+
+    // Print the text with proper formatting
+    println!("{}", skin.term_text(text));
 
     Ok(())
 }

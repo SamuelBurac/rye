@@ -53,8 +53,8 @@ impl AnthropicProvider {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
 
-        let model = env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        let model =
+            env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
         Ok(Self {
             client: Client::new(),
@@ -69,7 +69,10 @@ impl LLMProvider for AnthropicProvider {
     async fn generate_response_stream(
         &self,
         messages: &[(String, String)],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, Box<dyn std::error::Error + Send>>> + Send>>, Box<dyn std::error::Error>> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<String, Box<dyn std::error::Error + Send>>> + Send>>,
+        Box<dyn std::error::Error>,
+    > {
         let mut api_messages = Vec::new();
 
         let system_message = "You are a helpful assistant. Always respond in markdown format. When referring to information you've previously provided in this conversation, reference the relevant sections instead of repeating the information. Be concise and avoid unnecessary repetition.";
