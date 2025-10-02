@@ -53,8 +53,8 @@ impl AnthropicProvider {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
 
-        let model =
-            env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        let model = env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
 
         Ok(Self {
             client: Client::new(),

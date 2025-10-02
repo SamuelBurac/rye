@@ -8,7 +8,8 @@ use conversation::{list_conversations, Conversation};
 use crossterm::{cursor, execute, terminal};
 use providers::{anthropic::AnthropicProvider, LLMProvider};
 use render::render_markdown;
-use rustyline::DefaultEditor;
+use rustyline::config::Configurer;
+use rustyline::{DefaultEditor, EditMode};
 use skim::prelude::*;
 use std::io;
 use std::sync::Arc;
@@ -90,7 +91,9 @@ fn select_conversation() -> Result<Option<String>, Box<dyn std::error::Error>> {
     }
 }
 
-fn render_conversation_history(conversation: &Conversation) -> Result<(), Box<dyn std::error::Error>> {
+fn render_conversation_history(
+    conversation: &Conversation,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Read and render the entire markdown file
     let content = std::fs::read_to_string(&conversation.file_path)?;
 
@@ -117,7 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_provider: Box<dyn LLMProvider> = match args.provider.to_lowercase().as_str() {
         "anthropic" => Box::new(AnthropicProvider::new()?),
         _ => {
-            eprintln!("Error: Unknown provider '{}'. Currently only 'anthropic' is supported.", args.provider);
+            eprintln!(
+                "Error: Unknown provider '{}'. Currently only 'anthropic' is supported.",
+                args.provider
+            );
             std::process::exit(1);
         }
     };
@@ -134,7 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         conv
                     }
                     Err(_) => {
-                        println!("Could not find conversation {}. Starting new conversation.", id);
+                        println!(
+                            "Could not find conversation {}. Starting new conversation.",
+                            id
+                        );
                         Conversation::new()?
                     }
                 }
@@ -149,7 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             conv
                         }
                         Err(_) => {
-                            println!("Could not find conversation {}. Starting new conversation.", id);
+                            println!(
+                                "Could not find conversation {}. Starting new conversation.",
+                                id
+                            );
                             Conversation::new()?
                         }
                     },
@@ -169,6 +181,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut rl = DefaultEditor::new()?;
+
+    // Set vi mode if EDITOR or VISUAL contains vi/vim/nvim
+    if let Ok(editor) = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")) {
+        let editor_lower = editor.to_lowercase();
+        if editor_lower.contains("vi")
+            || editor_lower.contains("vim")
+            || editor_lower.contains("nvim")
+        {
+            println!("Setting vi mode");
+            rl.set_edit_mode(EditMode::Vi);
+        }
+    }
 
     loop {
         // Print a visually appealing separator before input
@@ -234,7 +258,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match llm_provider.generate_title(first_user_message).await {
                                     Ok(title) => {
                                         if let Err(e) = conversation.set_title(title) {
-                                            eprintln!("Warning: Could not set conversation title: {}", e);
+                                            eprintln!(
+                                                "Warning: Could not set conversation title: {}",
+                                                e
+                                            );
                                         }
                                     }
                                     Err(e) => {
