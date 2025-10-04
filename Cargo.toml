@@ -13,8 +13,7 @@ uuid = { version = "1.18", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 termimad = "0.34"
 crossterm = "0.29"
-rustyline = "17.0"
 dirs = "6.0"
 async-trait = "0.1"
 futures = "0.3"
-skim = "0.15"
+skim = "0.20"

@@ -4,14 +4,18 @@ mod render;
 mod streaming;
 
 use clap::Parser;
-use conversation::{list_conversations, Conversation};
-use crossterm::{cursor, execute, terminal};
-use providers::{anthropic::AnthropicProvider, LLMProvider};
+use conversation::{Conversation, list_conversations};
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute,
+    style::{Color, ResetColor, SetForegroundColor},
+    terminal,
+};
+use providers::{LLMProvider, anthropic::AnthropicProvider};
 use render::render_markdown;
-use rustyline::config::Configurer;
-use rustyline::{DefaultEditor, EditMode};
 use skim::prelude::*;
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use streaming::stream_and_render_response;
 
@@ -26,6 +30,47 @@ struct Args {
     /// LLM provider to use (currently only "anthropic" is supported)
     #[arg(short, long, default_value = "anthropic")]
     provider: String,
+}
+
+fn select_command() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let commands = vec!["/new-conversation - Start a new conversation"];
+
+    let options = SkimOptionsBuilder::default()
+        .height("50%".to_string())
+        .prompt("Select a command: ".to_string())
+        .layout("reverse".to_string()) // Display results below the prompt
+        .build()
+        .unwrap();
+
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+
+    for cmd in commands {
+        tx.send(Arc::new(cmd.to_string())).unwrap();
+    }
+    drop(tx);
+
+    let output = Skim::run_with(&options, Some(rx));
+
+    // Don't clear the screen, just move down
+    println!();
+
+    match output {
+        Some(out) if !out.is_abort => {
+            if let Some(selected) = out.selected_items.first() {
+                let selected_text = selected.output().to_string();
+                // Extract command (everything before " - ")
+                let cmd = if let Some(pos) = selected_text.find(" - ") {
+                    selected_text[..pos].to_string()
+                } else {
+                    selected_text
+                };
+                Ok(Some(cmd))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 fn select_conversation() -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -108,6 +153,20 @@ fn render_conversation_history(
     Ok(())
 }
 
+fn cleanup_and_exit(conversation: &Conversation) {
+    // Delete conversation file if no messages were added
+    if conversation.messages.is_empty() {
+        if let Err(e) = std::fs::remove_file(&conversation.file_path) {
+            eprintln!("Warning: Could not delete empty conversation file: {}", e);
+        }
+    } else {
+        println!(
+            "Conversation saved to: {}",
+            conversation.file_path.display()
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -180,30 +239,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         conv
     };
 
-    let mut rl = DefaultEditor::new()?;
-
-    // Set vi mode if EDITOR or VISUAL contains vi/vim/nvim
-    if let Ok(editor) = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")) {
-        let editor_lower = editor.to_lowercase();
-        if editor_lower.contains("vi")
-            || editor_lower.contains("vim")
-            || editor_lower.contains("nvim")
-        {
-            println!("Setting vi mode");
-            rl.set_edit_mode(EditMode::Vi);
-        }
-    }
-
-    loop {
+    let mut running = true;
+    while running {
         // Print a visually appealing separator before input
         println!("\n{}", "─".repeat(60));
-        println!("💬 Your Message:");
-        println!("{}", "─".repeat(60));
 
-        let input = match rl.readline("➤ ") {
-            Ok(line) => line.trim().to_string(),
-            Err(_) => break,
+        // Check first character to see if it's a command
+        terminal::enable_raw_mode()?;
+
+        print!("➤ ");
+        io::stdout().flush()?;
+
+        let Event::Key(key_event) = event::read()? else {
+            terminal::disable_raw_mode()?;
+            continue;
         };
+
+        let input = match key_event.code {
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                terminal::disable_raw_mode()?;
+                println!("\nExiting...");
+                cleanup_and_exit(&conversation);
+                running = false;
+                String::new()
+            }
+            KeyCode::Char('/') => {
+                // Switch to command mode immediately
+                // Clear current line and redraw with cyan
+                execute!(io::stdout(), cursor::MoveToColumn(0))?;
+                execute!(
+                    io::stdout(),
+                    terminal::Clear(terminal::ClearType::CurrentLine)
+                )?;
+                execute!(io::stdout(), cursor::MoveUp(1))?;
+                execute!(
+                    io::stdout(),
+                    terminal::Clear(terminal::ClearType::CurrentLine)
+                )?;
+
+                execute!(io::stdout(), SetForegroundColor(Color::Cyan))?;
+                println!("{}", "─".repeat(60));
+                print!("➤ /");
+                execute!(io::stdout(), ResetColor)?;
+                io::stdout().flush()?;
+
+                terminal::disable_raw_mode()?;
+                println!();
+
+                // Show command selector
+                match select_command()? {
+                    Some(cmd) => cmd,
+                    None => {
+                        println!("No command selected.");
+                        String::new()
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                // Not a command, use normal input
+                print!("{}", c);
+                io::stdout().flush()?;
+                terminal::disable_raw_mode()?;
+
+                // Read the rest of the line normally
+                let mut rest = String::new();
+                io::stdin().read_line(&mut rest)?;
+                format!("{}{}", c, rest.trim())
+            }
+            KeyCode::Enter => {
+                terminal::disable_raw_mode()?;
+                println!();
+                String::new()
+            }
+            _ => {
+                terminal::disable_raw_mode()?;
+                String::new()
+            }
+        };
+
+        let input = input.trim().to_string();
 
         if input.is_empty() {
             continue;
@@ -212,19 +326,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_lower = input.to_lowercase();
 
         if input_lower == "exit" || input_lower == "quit" {
-            break;
+            cleanup_and_exit(&conversation);
+            running = false;
+            continue;
         }
 
         if input_lower == "help" {
             println!("\nCommands:");
             println!("  exit/quit - Quit the program (case insensitive)");
             println!("  help - Show this help");
-            println!("  Conversation ID: {}", conversation.id);
+            println!("\nSlash Commands:");
+            println!("  / - Open command selector (fuzzy search)");
+            println!("  /new-conversation - Start a new conversation");
+            println!("\nCurrent Conversation:");
+            println!("  ID: {}", conversation.id);
             println!("  File: {}\n", conversation.file_path.display());
-            continue;
         }
 
-        rl.add_history_entry(&input)?;
+        // Handle slash commands (for direct typing like /new-conversation)
+        if input.starts_with('/') {
+            match input_lower.as_str() {
+                "/new-conversation" => {
+                    // Check if current conversation is empty and delete if so
+                    if conversation.messages.is_empty() {
+                        if let Err(e) = std::fs::remove_file(&conversation.file_path) {
+                            eprintln!("Warning: Could not delete empty conversation file: {}", e);
+                        } else {
+                            println!("Empty conversation deleted.");
+                        }
+                    } else {
+                        println!(
+                            "Current conversation saved to: {}",
+                            conversation.file_path.display()
+                        );
+                    }
+                    conversation = Conversation::new()?;
+                    println!("Started new conversation: {}", conversation.id);
+                    continue;
+                }
+                _ => {
+                    println!(
+                        "Unknown command: {}. Type 'help' for available commands.",
+                        input_lower
+                    );
+                    continue;
+                }
+            }
+        }
 
         // Add user message to conversation
         conversation.add_message("user", &input)?;
@@ -253,20 +401,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Generate title after first exchange if conversation doesn't have one
-                        if conversation.title.is_none() && conversation.messages.len() == 2 {
-                            if let Some((_, first_user_message)) = conversation.messages.first() {
-                                match llm_provider.generate_title(first_user_message).await {
-                                    Ok(title) => {
-                                        if let Err(e) = conversation.set_title(title) {
-                                            eprintln!(
-                                                "Warning: Could not set conversation title: {}",
-                                                e
-                                            );
-                                        }
+                        if conversation.title.is_none()
+                            && conversation.messages.len() == 2
+                            && let Some((_, first_user_message)) = conversation.messages.first()
+                        {
+                            match llm_provider.generate_title(first_user_message).await {
+                                Ok(title) => {
+                                    if let Err(e) = conversation.set_title(title) {
+                                        eprintln!(
+                                            "Warning: Could not set conversation title: {}",
+                                            e
+                                        );
                                     }
-                                    Err(e) => {
-                                        eprintln!("Warning: Could not generate title: {}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: Could not generate title: {}", e);
                                 }
                             }
                         }
@@ -284,9 +433,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    println!(
-        "Conversation saved to: {}",
-        conversation.file_path.display()
-    );
     Ok(())
 }
